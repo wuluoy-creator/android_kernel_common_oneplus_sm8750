@@ -215,21 +215,23 @@ static void update_child_burst_topological(
 	struct task_struct *p, u64 now, u32 depth, u32 *acnt, u32 *asum) {
 	u32 cnt = 0, dcnt = 0, sum = 0;
 	struct task_struct *child, *dec;
+	struct sched_bore_stats *bore_stats;
 	struct sched_burst_cache *bc __maybe_unused;
 
 	for_each_child(p, child) {
 		dec = child;
 		while ((dcnt = count_entries_upto2(&dec->children)) == 1)
 			dec = list_first_entry(&dec->children, struct task_struct, sibling);
+		bore_stats = dec->se.bore_stats;
 		
 		if (!dcnt || !depth) {
-			if (!task_is_bore_eligible(dec) || !dec->se.bore_stats) continue;
+			if (!task_is_bore_eligible(dec) || !bore_stats) continue;
 			cnt++;
-			sum += dec->se.bore_stats->burst_penalty;
+			sum += bore_stats->burst_penalty;
 			continue;
 		}
-		if (!dec->se.bore_stats) continue;
-		bc = &dec->se.bore_stats->child_burst;
+		if (!bore_stats) continue;
+		bc = &bore_stats->child_burst;
 		spin_lock(&bc->lock);
 		if (!burst_cache_expired(bc, now)) {
 			cnt += bc->count;
@@ -255,7 +257,7 @@ static inline u8 inherit_burst_topological(
 	struct task_struct *anc = p;
 	struct sched_burst_cache *bc;
 	u32 cnt = 0, sum = 0;
-	u32 base_child_cnt = 0;
+	u32 child_cnt, base_child_cnt = 0;
 
 	if (clone_flags & CLONE_PARENT) {
 		anc = anc->real_parent;
@@ -264,7 +266,7 @@ static inline u8 inherit_burst_topological(
 
 	for (struct task_struct *next;
 		 anc != (next = anc->real_parent) &&
-		 	count_entries_upto2(&anc->children) <= base_child_cnt;) {
+		 	(child_cnt = count_entries_upto2(&anc->children)) <= base_child_cnt;) {
 		anc = next;
 		base_child_cnt = 1;
 	}
