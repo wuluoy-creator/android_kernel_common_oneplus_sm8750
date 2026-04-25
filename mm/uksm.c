@@ -4885,7 +4885,7 @@ rm_slot:
 
 static int ksmd_should_run(void)
 {
-	return uksm_run & UKSM_RUN_MERGE & check_game_pid();
+	return (READ_ONCE(uksm_run) & UKSM_RUN_MERGE) && check_game_pid();
 }
 
 static int uksm_scan_thread(void *nothing)
@@ -5892,4 +5892,3 @@ subsys_initcall(ksm_init);
 #else
 late_initcall(uksm_init);
 #endif
-
