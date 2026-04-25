@@ -826,20 +826,6 @@ inline u64 get_hmbird_cpu_util(int cpu)
 	return prev_runnable_sum_fixed;
 }
 
-static inline unsigned int get_scaling_max_freq(unsigned int cpu)
-{
-	struct cpufreq_policy *policy = cpufreq_cpu_get_raw(cpu);
-
-	return (policy == NULL) ? 0 : policy->max;
-}
-
-static inline unsigned int get_cpuinfo_max_freq(unsigned int cpu)
-{
-	struct cpufreq_policy *policy = cpufreq_cpu_get_raw(cpu);
-
-	return (policy == NULL) ? 0 : policy->cpuinfo.max_freq;
-}
-
 static u64 get_cpus_max_util(struct cpumask *mask)
 {
 	int cpu;
@@ -848,22 +834,31 @@ static u64 get_cpus_max_util(struct cpumask *mask)
 	unsigned long effective_cap = 0;
 
 	for_each_cpu(cpu, mask) {
+		struct cpufreq_policy *policy;
+		unsigned int scaling_max_freq;
+		unsigned int cpuinfo_max_freq;
+		unsigned long arch_cap;
+
 		if (slim_walt_ctrl)
 			slim_get_cpu_util(cpu, &util);
 		else
 			util = get_hmbird_cpu_util(cpu);
 
+		policy = cpufreq_cpu_get_raw(cpu);
+		scaling_max_freq = policy ? policy->max : 0;
+		cpuinfo_max_freq = policy ? policy->cpuinfo.max_freq : 0;
+		arch_cap = arch_scale_cpu_capacity(cpu);
+
 		/* if max freq is 0, effective_cap use arch_scale_cpu_capacity*/
-		if (unlikely(!get_scaling_max_freq(cpu) || !get_cpuinfo_max_freq(cpu)))
-			effective_cap = arch_scale_cpu_capacity(cpu);
+		if (unlikely(!scaling_max_freq || !cpuinfo_max_freq))
+			effective_cap = arch_cap;
 		else
-			effective_cap = arch_scale_cpu_capacity(cpu) *
-					get_scaling_max_freq(cpu) / get_cpuinfo_max_freq(cpu);
+			effective_cap = arch_cap * scaling_max_freq / cpuinfo_max_freq;
 
 		ratio = util * 100 / effective_cap;
 		hmbird_info_systrace("C|9999|Cpu%d_util|%llu\n", cpu, util);
 		hmbird_info_systrace("C|9999|Cpu%d_cap|%llu\n",
-				cpu, (u64)arch_scale_cpu_capacity(cpu));
+				cpu, (u64)arch_cap);
 		hmbird_info_systrace("C|9999|Cpu%d_effective_cap|%llu\n",
 				cpu, (u64)effective_cap);
 
@@ -4354,4 +4349,3 @@ void __init init_sched_hmbird_class(void)
 
 	panic_blk_init();
 }
-
