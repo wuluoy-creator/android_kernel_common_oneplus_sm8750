@@ -206,4 +206,4 @@ elif [ "${LOCALVERSION+set}" != "set" ]; then
 fi
 
 #echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}"
-echo "${KERNELVERSION}-OKI${config_localversion}${LOCALVERSION}"
+echo "${KERNELVERSION}${config_localversion}${LOCALVERSION}"
