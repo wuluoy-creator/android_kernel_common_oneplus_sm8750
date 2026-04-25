@@ -1,8 +1,17 @@
 name: 一加SM8750(sun)内核云编译
 
+run-name: >-
+  ${{ github.event.inputs.kernel_branch == github.event.repository.default_branch && '主线编译' || '测试编译' }}
+  - ${{ github.event.inputs.kernel_branch }}
+
 on:
   workflow_dispatch:
     inputs:
+      kernel_branch:
+        description: '内核源码分支'
+        required: true
+        type: string
+        default: '6.6-final'
       ksu_type:
         description: 'KernelSU分支(默认ReSukiSU)'
         required: true
@@ -23,7 +32,7 @@ jobs:
       - name: 1. 拉取内核源码
         run: |
           sudo apt install -y libarchive-tools
-          aria2c -s16 -x16 -k1M "https://github.com/wuluoy-creator/android_kernel_common_oneplus_sm8750/archive/refs/heads/6.6-final.zip" -o common.zip && \
+          aria2c -s16 -x16 -k1M "https://github.com/${{ github.repository }}/archive/refs/heads/${{ github.event.inputs.kernel_branch }}.zip" -o common.zip && \
           bsdtar -xf common.zip --strip-components=1 && \
           rm -f common.zip
 
@@ -147,7 +156,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: OnePlus-SM8750-sun-内核卡刷包
+          name: OnePlus-SM8750-sun-${{ github.event.inputs.kernel_branch }}-内核卡刷包
           path: |
             OnePlus-SM8750-sun-Custom-Kernel.zip
             build.log
