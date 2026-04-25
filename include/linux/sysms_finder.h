@@ -5,22 +5,8 @@
 
 
 enum {
-    SYMBOL_GAME_PID,
+	SYMBOL_GAME_PID,
 	NR_SYMBOLS,
-};
-
-struct symbol_entry {
-	const char *name;
-	unsigned long addr;
-	bool found;
-};
-
-static struct symbol_entry symbols_status[NR_SYMBOLS] = {
-    [SYMBOL_GAME_PID] = {
-		.name = "game_pid",
-		.addr = 0,
-		.found = false,
-	},
 };
 
 unsigned long lookup_symbol(int symbol_index);
