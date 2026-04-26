@@ -1469,6 +1469,7 @@ struct sock *mptcp_subflow_get_send(struct mptcp_sock *msk)
 	struct subflow_send_info send_info[SSK_MODE_MAX];
 	struct mptcp_subflow_context *subflow;
 	struct sock *sk = (struct sock *)msk;
+	unsigned long pacing_rate;
 	u32 pace, burst, wmem;
 	int i, nr_active = 0;
 	struct sock *ssk;
@@ -1483,6 +1484,7 @@ struct sock *mptcp_subflow_get_send(struct mptcp_sock *msk)
 
 	mptcp_for_each_subflow(msk, subflow) {
 		bool backup = subflow->backup || subflow->request_bkup;
+		u32 queued;
 
 		trace_mptcp_subflow_get_send(subflow);
 		ssk =  mptcp_subflow_tcp_sock(subflow);
@@ -1500,7 +1502,8 @@ struct sock *mptcp_subflow_get_send(struct mptcp_sock *msk)
 				continue;
 		}
 
-		linger_time = div_u64((u64)READ_ONCE(ssk->sk_wmem_queued) << 32, pace);
+		queued = READ_ONCE(ssk->sk_wmem_queued);
+		linger_time = div_u64((u64)queued << 32, pace);
 		if (linger_time < send_info[backup].linger_time) {
 			send_info[backup].ssk = ssk;
 			send_info[backup].linger_time = linger_time;
@@ -1527,14 +1530,16 @@ struct sock *mptcp_subflow_get_send(struct mptcp_sock *msk)
 	if (!ssk || !sk_stream_memory_free(ssk))
 		return NULL;
 
-	burst = min_t(int, MPTCP_SEND_BURST_SIZE, mptcp_wnd_end(msk) - msk->snd_nxt);
+	burst = min_t(int, MPTCP_SEND_BURST_SIZE,
+		      mptcp_wnd_end(msk) - READ_ONCE(msk->snd_nxt));
 	wmem = READ_ONCE(ssk->sk_wmem_queued);
 	if (!burst)
 		return ssk;
 
 	subflow = mptcp_subflow_ctx(ssk);
+	pacing_rate = READ_ONCE(ssk->sk_pacing_rate);
 	subflow->avg_pacing_rate = div_u64((u64)subflow->avg_pacing_rate * wmem +
-					   READ_ONCE(ssk->sk_pacing_rate) * burst,
+					   pacing_rate * burst,
 					   burst + wmem);
 	msk->snd_burst = burst;
 	return ssk;

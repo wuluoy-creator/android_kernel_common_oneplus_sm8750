@@ -93,10 +93,10 @@ int mptcp_init_sched(struct mptcp_sock *msk,
 		return -EBUSY;
 
 	msk->sched = sched;
-	if (msk->sched->init)
-		msk->sched->init(msk);
+	if (sched->init)
+		sched->init(msk);
 
-	pr_debug("sched=%s\n", msk->sched->name);
+	pr_debug("sched=%s\n", sched->name);
 
 	return 0;
 }
@@ -124,6 +124,7 @@ void mptcp_subflow_set_scheduled(struct mptcp_subflow_context *subflow,
 int mptcp_sched_get_send(struct mptcp_sock *msk)
 {
 	struct mptcp_subflow_context *subflow;
+	struct mptcp_sched_ops *sched;
 	struct mptcp_sched_data data;
 
 	msk_owned_by_me(msk);
@@ -145,14 +146,16 @@ int mptcp_sched_get_send(struct mptcp_sock *msk)
 	}
 
 	data.reinject = false;
-	if (msk->sched == &mptcp_sched_default || !msk->sched)
+	sched = msk->sched;
+	if (sched == &mptcp_sched_default || !sched)
 		return mptcp_sched_default_get_subflow(msk, &data);
-	return msk->sched->get_subflow(msk, &data);
+	return sched->get_subflow(msk, &data);
 }
 
 int mptcp_sched_get_retrans(struct mptcp_sock *msk)
 {
 	struct mptcp_subflow_context *subflow;
+	struct mptcp_sched_ops *sched;
 	struct mptcp_sched_data data;
 
 	msk_owned_by_me(msk);
@@ -167,7 +170,8 @@ int mptcp_sched_get_retrans(struct mptcp_sock *msk)
 	}
 
 	data.reinject = true;
-	if (msk->sched == &mptcp_sched_default || !msk->sched)
+	sched = msk->sched;
+	if (sched == &mptcp_sched_default || !sched)
 		return mptcp_sched_default_get_subflow(msk, &data);
-	return msk->sched->get_subflow(msk, &data);
+	return sched->get_subflow(msk, &data);
 }
