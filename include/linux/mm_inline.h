@@ -127,12 +127,12 @@ static inline bool lru_gen_in_fault(void)
 
 static inline int lru_gen_from_seq(unsigned long seq)
 {
-	return seq % MAX_NR_GENS;
+	return seq & (MAX_NR_GENS - 1);
 }
 
 static inline int lru_hist_from_seq(unsigned long seq)
 {
-	return seq % NR_HIST_GENS;
+	return seq & (NR_HIST_GENS - 1);
 }
 
 static inline int lru_tier_from_refs(int refs)
@@ -164,14 +164,17 @@ static inline int folio_lru_gen(struct folio *folio)
 	return ((flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
 }
 
-static inline bool lru_gen_is_active(struct lruvec *lruvec, int gen)
+static inline bool lru_gen_is_active_seq(unsigned long max_seq, int gen)
 {
-	unsigned long max_seq = lruvec->lrugen.max_seq;
-
 	VM_WARN_ON_ONCE(gen >= MAX_NR_GENS);
 
 	/* see the comment on MIN_NR_GENS */
 	return gen == lru_gen_from_seq(max_seq) || gen == lru_gen_from_seq(max_seq - 1);
+}
+
+static inline bool lru_gen_is_active(struct lruvec *lruvec, int gen)
+{
+	return lru_gen_is_active_seq(lruvec->lrugen.max_seq, gen);
 }
 
 static inline void lru_gen_update_size(struct lruvec *lruvec, struct folio *folio,
@@ -181,6 +184,9 @@ static inline void lru_gen_update_size(struct lruvec *lruvec, struct folio *foli
 	int zone = folio_zonenum(folio);
 	int delta = folio_nr_pages(folio);
 	enum lru_list lru = type * LRU_INACTIVE_FILE;
+	unsigned long max_seq = lruvec->lrugen.max_seq;
+	bool old_active = old_gen >= 0 && lru_gen_is_active_seq(max_seq, old_gen);
+	bool new_active = new_gen >= 0 && lru_gen_is_active_seq(max_seq, new_gen);
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 
 	VM_WARN_ON_ONCE(old_gen != -1 && old_gen >= MAX_NR_GENS);
@@ -196,7 +202,7 @@ static inline void lru_gen_update_size(struct lruvec *lruvec, struct folio *foli
 
 	/* addition */
 	if (old_gen < 0) {
-		if (lru_gen_is_active(lruvec, new_gen))
+		if (new_active)
 			lru += LRU_ACTIVE;
 		__update_lru_size(lruvec, lru, zone, delta);
 		return;
@@ -204,20 +210,20 @@ static inline void lru_gen_update_size(struct lruvec *lruvec, struct folio *foli
 
 	/* deletion */
 	if (new_gen < 0) {
-		if (lru_gen_is_active(lruvec, old_gen))
+		if (old_active)
 			lru += LRU_ACTIVE;
 		__update_lru_size(lruvec, lru, zone, -delta);
 		return;
 	}
 
 	/* promotion */
-	if (!lru_gen_is_active(lruvec, old_gen) && lru_gen_is_active(lruvec, new_gen)) {
+	if (!old_active && new_active) {
 		__update_lru_size(lruvec, lru, zone, -delta);
 		__update_lru_size(lruvec, lru + LRU_ACTIVE, zone, delta);
 	}
 
 	/* demotion requires isolation, e.g., lru_deactivate_fn() */
-	VM_WARN_ON_ONCE(lru_gen_is_active(lruvec, old_gen) && !lru_gen_is_active(lruvec, new_gen));
+	VM_WARN_ON_ONCE(old_active && !new_active);
 }
 
 static inline bool lru_gen_add_dst(struct lruvec *lruvec, struct folio *dst)
