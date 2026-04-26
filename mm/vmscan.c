@@ -3679,7 +3679,7 @@ static bool should_clear_pmd_young(void)
 			for ((zone) = 0; (zone) < MAX_NR_ZONES; (zone)++)
 
 #define get_memcg_gen(seq)	((seq) % MEMCG_NR_GENS)
-#define get_memcg_bin(bin)	((bin) % MEMCG_NR_BINS)
+#define get_memcg_bin(bin)	((bin) & (MEMCG_NR_BINS - 1))
 
 static struct lruvec *get_lruvec(struct mem_cgroup *memcg, int nid)
 {
@@ -3763,7 +3763,7 @@ static bool __maybe_unused seq_is_valid(struct lruvec *lruvec)
 
 static inline int filter_gen_from_seq(unsigned long seq)
 {
-	return seq % NR_BLOOM_FILTERS;
+	return seq & (NR_BLOOM_FILTERS - 1);
 }
 
 static void get_item_key(void *item, int *key)
@@ -4400,6 +4400,13 @@ static struct folio *get_pfn_folio(unsigned long pfn, struct mem_cgroup *memcg,
 	return folio;
 }
 
+static inline bool should_mark_folio_dirty(struct folio *folio)
+{
+	return !folio_test_dirty(folio) &&
+	       !(folio_test_anon(folio) && folio_test_swapbacked(folio) &&
+		 !folio_test_swapcache(folio));
+}
+
 static bool suitable_to_scan(int total, int young)
 {
 	int n = clamp_t(int, cache_line_size() / sizeof(pte_t), 2, 8);
@@ -4459,9 +4466,7 @@ restart:
 		young++;
 		walk->mm_stats[MM_LEAF_YOUNG]++;
 
-		if (pte_dirty(ptent) && !folio_test_dirty(folio) &&
-		    !(folio_test_anon(folio) && folio_test_swapbacked(folio) &&
-		      !folio_test_swapcache(folio)))
+		if (pte_dirty(ptent) && should_mark_folio_dirty(folio))
 			folio_mark_dirty(folio);
 
 		old_gen = folio_update_gen(folio, new_gen);
@@ -4480,7 +4485,8 @@ restart:
 
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) || defined(CONFIG_ARCH_HAS_NONLEAF_PMD_YOUNG)
 static void walk_pmd_range_locked(pud_t *pud, unsigned long addr, struct vm_area_struct *vma,
-				  struct mm_walk *args, unsigned long *bitmap, unsigned long *first)
+				  struct mm_walk *args, unsigned long *bitmap, unsigned long *first,
+				  bool clear_pmd_young)
 {
 	int i;
 	pmd_t *pmd;
@@ -4525,7 +4531,7 @@ static void walk_pmd_range_locked(pud_t *pud, unsigned long addr, struct vm_area
 			goto next;
 
 		if (!pmd_trans_huge(pmd[i])) {
-			if (should_clear_pmd_young())
+			if (clear_pmd_young)
 				pmdp_test_and_clear_young(vma, addr, pmd + i);
 			goto next;
 		}
@@ -4539,9 +4545,7 @@ static void walk_pmd_range_locked(pud_t *pud, unsigned long addr, struct vm_area
 
 		walk->mm_stats[MM_LEAF_YOUNG]++;
 
-		if (pmd_dirty(pmd[i]) && !folio_test_dirty(folio) &&
-		    !(folio_test_anon(folio) && folio_test_swapbacked(folio) &&
-		      !folio_test_swapcache(folio)))
+		if (pmd_dirty(pmd[i]) && should_mark_folio_dirty(folio))
 			folio_mark_dirty(folio);
 
 		old_gen = folio_update_gen(folio, new_gen);
@@ -4558,7 +4562,8 @@ done:
 }
 #else
 static void walk_pmd_range_locked(pud_t *pud, unsigned long addr, struct vm_area_struct *vma,
-				  struct mm_walk *args, unsigned long *bitmap, unsigned long *first)
+				  struct mm_walk *args, unsigned long *bitmap, unsigned long *first,
+				  bool clear_pmd_young)
 {
 }
 #endif
@@ -4574,6 +4579,7 @@ static void walk_pmd_range(pud_t *pud, unsigned long start, unsigned long end,
 	DECLARE_BITMAP(bitmap, MIN_LRU_BATCH);
 	unsigned long first = -1;
 	struct lru_gen_mm_walk *walk = args->private;
+	bool clear_pmd_young = should_clear_pmd_young();
 
 	VM_WARN_ON_ONCE(pud_leaf(*pud));
 
@@ -4612,17 +4618,19 @@ restart:
 			if (pfn < pgdat->node_start_pfn || pfn >= pgdat_end_pfn(pgdat))
 				continue;
 
-			walk_pmd_range_locked(pud, addr, vma, args, bitmap, &first);
+			walk_pmd_range_locked(pud, addr, vma, args, bitmap, &first,
+					      clear_pmd_young);
 			continue;
 		}
 #endif
 		walk->mm_stats[MM_NONLEAF_TOTAL]++;
 
-		if (should_clear_pmd_young()) {
+		if (clear_pmd_young) {
 			if (!pmd_young(val))
 				continue;
 
-			walk_pmd_range_locked(pud, addr, vma, args, bitmap, &first);
+			walk_pmd_range_locked(pud, addr, vma, args, bitmap, &first,
+					      clear_pmd_young);
 		}
 
 		if (!walk->force_scan && !test_bloom_filter(walk->lruvec, walk->max_seq, pmd + i))
@@ -4639,7 +4647,7 @@ restart:
 		update_bloom_filter(walk->lruvec, walk->max_seq + 1, pmd + i);
 	}
 
-	walk_pmd_range_locked(pud, -1, vma, args, bitmap, &first);
+	walk_pmd_range_locked(pud, -1, vma, args, bitmap, &first, clear_pmd_young);
 
 	if (i < PTRS_PER_PMD && get_next_vma(PUD_MASK, PMD_SIZE, args, &start, &end))
 		goto restart;
@@ -5149,9 +5157,7 @@ void lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 
 		young++;
 
-		if (pte_dirty(ptent) && !folio_test_dirty(folio) &&
-		    !(folio_test_anon(folio) && folio_test_swapbacked(folio) &&
-		      !folio_test_swapcache(folio)))
+		if (pte_dirty(ptent) && should_mark_folio_dirty(folio))
 			folio_mark_dirty(folio);
 
 		if (walk) {
@@ -5328,15 +5334,15 @@ static int lru_gen_memcg_seg(struct lruvec *lruvec)
  ******************************************************************************/
 
 static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_control *sc,
-		       int tier_idx)
+		       int tier_idx, int type, int zone, int delta, int min_gen,
+		       int hist)
 {
 	bool success;
 	bool dirty, writeback;
-	int gen = folio_lru_gen(folio);
-	int type = folio_is_file_lru(folio);
-	int zone = folio_zonenum(folio);
-	int delta = folio_nr_pages(folio);
-	int refs = folio_lru_refs(folio);
+	unsigned long flags = READ_ONCE(folio->flags);
+	int gen = ((flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
+	int refs = ((flags & LRU_REFS_MASK) >> LRU_REFS_PGOFF) +
+		   !!(flags & BIT(PG_workingset));
 	int tier = lru_tier_from_refs(refs);
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 
@@ -5362,15 +5368,13 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
 	}
 
 	/* promoted */
-	if (gen != lru_gen_from_seq(lrugen->min_seq[type])) {
+	if (gen != min_gen) {
 		list_move(&folio->lru, &lrugen->folios[gen][type][zone]);
 		return true;
 	}
 
 	/* protected */
 	if (tier > tier_idx || refs == BIT(LRU_REFS_WIDTH)) {
-		int hist = lru_hist_from_seq(lrugen->min_seq[type]);
-
 		gen = folio_inc_gen(lruvec, folio, false);
 		list_move_tail(&folio->lru, &lrugen->folios[gen][type][zone]);
 
@@ -5450,6 +5454,8 @@ static int scan_folios(struct lruvec *lruvec, struct scan_control *sc,
 	int scanned = 0;
 	int isolated = 0;
 	int skipped = 0;
+	int hist;
+	unsigned long min_seq;
 	int remaining = MAX_LRU_BATCH;
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
@@ -5459,7 +5465,9 @@ static int scan_folios(struct lruvec *lruvec, struct scan_control *sc,
 	if (get_nr_gens(lruvec, type) == MIN_NR_GENS)
 		return 0;
 
-	gen = lru_gen_from_seq(lrugen->min_seq[type]);
+	min_seq = lrugen->min_seq[type];
+	gen = lru_gen_from_seq(min_seq);
+	hist = lru_hist_from_seq(min_seq);
 
 	for (i = MAX_NR_ZONES; i > 0; i--) {
 		LIST_HEAD(moved);
@@ -5478,7 +5486,8 @@ static int scan_folios(struct lruvec *lruvec, struct scan_control *sc,
 
 			scanned += delta;
 
-			if (sort_folio(lruvec, folio, sc, tier))
+			if (sort_folio(lruvec, folio, sc, tier, type, zone, delta,
+				       gen, hist))
 				sorted += delta;
 			else if (isolate_folio(lruvec, folio, sc)) {
 				list_add(&folio->lru, list);
@@ -6739,6 +6748,12 @@ static int __init init_lru_gen(void)
 {
 	BUILD_BUG_ON(MIN_NR_GENS + 1 >= MAX_NR_GENS);
 	BUILD_BUG_ON(BIT(LRU_GEN_WIDTH) <= MAX_NR_GENS);
+	BUILD_BUG_ON_NOT_POWER_OF_2(MAX_NR_GENS);
+	BUILD_BUG_ON_NOT_POWER_OF_2(NR_HIST_GENS);
+	BUILD_BUG_ON_NOT_POWER_OF_2(NR_BLOOM_FILTERS);
+#ifdef CONFIG_MEMCG
+	BUILD_BUG_ON_NOT_POWER_OF_2(MEMCG_NR_BINS);
+#endif
 
 	if (sysfs_create_group(mm_kobj, &lru_gen_attr_group))
 		pr_err("lru_gen: failed to create sysfs group\n");
