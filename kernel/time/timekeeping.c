@@ -870,24 +870,33 @@ u32 ktime_get_resolution_ns(void)
 }
 EXPORT_SYMBOL_GPL(ktime_get_resolution_ns);
 
-static ktime_t *offsets[TK_OFFS_MAX] = {
-	[TK_OFFS_REAL]	= &tk_core.timekeeper.offs_real,
-	[TK_OFFS_BOOT]	= &tk_core.timekeeper.offs_boot,
-	[TK_OFFS_TAI]	= &tk_core.timekeeper.offs_tai,
-};
+static inline ktime_t tk_offset(const struct timekeeper *tk, enum tk_offsets offs)
+{
+	switch (offs) {
+	case TK_OFFS_REAL:
+		return tk->offs_real;
+	case TK_OFFS_BOOT:
+		return tk->offs_boot;
+	case TK_OFFS_TAI:
+		return tk->offs_tai;
+	default:
+		WARN_ON_ONCE(1);
+		return 0;
+	}
+}
 
 ktime_t ktime_get_with_offset(enum tk_offsets offs)
 {
 	struct timekeeper *tk = &tk_core.timekeeper;
 	unsigned int seq;
-	ktime_t base, *offset = offsets[offs];
+	ktime_t base;
 	u64 nsecs;
 
 	WARN_ON(timekeeping_suspended);
 
 	do {
 		seq = read_seqcount_begin(&tk_core.seq);
-		base = ktime_add(tk->tkr_mono.base, *offset);
+		base = ktime_add(tk->tkr_mono.base, tk_offset(tk, offs));
 		nsecs = timekeeping_get_ns(&tk->tkr_mono);
 
 	} while (read_seqcount_retry(&tk_core.seq, seq));
@@ -901,14 +910,14 @@ ktime_t ktime_get_coarse_with_offset(enum tk_offsets offs)
 {
 	struct timekeeper *tk = &tk_core.timekeeper;
 	unsigned int seq;
-	ktime_t base, *offset = offsets[offs];
+	ktime_t base;
 	u64 nsecs;
 
 	WARN_ON(timekeeping_suspended);
 
 	do {
 		seq = read_seqcount_begin(&tk_core.seq);
-		base = ktime_add(tk->tkr_mono.base, *offset);
+		base = ktime_add(tk->tkr_mono.base, tk_offset(tk, offs));
 		nsecs = tk->tkr_mono.xtime_nsec >> tk->tkr_mono.shift;
 
 	} while (read_seqcount_retry(&tk_core.seq, seq));
@@ -924,13 +933,13 @@ EXPORT_SYMBOL_GPL(ktime_get_coarse_with_offset);
  */
 ktime_t ktime_mono_to_any(ktime_t tmono, enum tk_offsets offs)
 {
-	ktime_t *offset = offsets[offs];
+	struct timekeeper *tk = &tk_core.timekeeper;
 	unsigned int seq;
 	ktime_t tconv;
 
 	do {
 		seq = read_seqcount_begin(&tk_core.seq);
-		tconv = ktime_add(tmono, *offset);
+		tconv = ktime_add(tmono, tk_offset(tk, offs));
 	} while (read_seqcount_retry(&tk_core.seq, seq));
 
 	return tconv;

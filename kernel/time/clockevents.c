@@ -240,7 +240,7 @@ static int clockevents_program_min_delta(struct clock_event_device *dev)
 		delta = dev->min_delta_ns;
 		dev->next_event = ktime_add_ns(ktime_get(), delta);
 
-		if (clockevent_state_shutdown(dev))
+		if (unlikely(clockevent_state_shutdown(dev)))
 			return 0;
 
 		dev->retries++;
@@ -279,7 +279,7 @@ static int clockevents_program_min_delta(struct clock_event_device *dev)
 		delta += dev->min_delta_ns;
 		dev->next_event = ktime_add_ns(ktime_get(), delta);
 
-		if (clockevent_state_shutdown(dev))
+		if (unlikely(clockevent_state_shutdown(dev)))
 			return 0;
 
 		dev->retries++;
@@ -312,7 +312,7 @@ int clockevents_program_event(struct clock_event_device *dev, ktime_t expires,
 
 	dev->next_event = expires;
 
-	if (clockevent_state_shutdown(dev))
+	if (unlikely(clockevent_state_shutdown(dev)))
 		return 0;
 
 	/* We must be in ONESHOT state here */
@@ -324,7 +324,7 @@ int clockevents_program_event(struct clock_event_device *dev, ktime_t expires,
 		return dev->set_next_ktime(expires, dev);
 
 	delta = ktime_to_ns(ktime_sub(expires, ktime_get()));
-	if (delta <= 0)
+	if (unlikely(delta <= 0))
 		return force ? clockevents_program_min_delta(dev) : -ETIME;
 
 	delta = min(delta, (int64_t) dev->max_delta_ns);

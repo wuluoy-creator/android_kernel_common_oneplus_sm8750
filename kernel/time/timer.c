@@ -1018,6 +1018,7 @@ __mod_timer(struct timer_list *timer, unsigned long expires, unsigned int option
 	unsigned long clk = 0, flags, bucket_expiry;
 	struct timer_base *base, *new_base;
 	unsigned int idx = UINT_MAX;
+	bool pending;
 	int ret = 0;
 
 	debug_assert_init(timer);
@@ -1027,7 +1028,8 @@ __mod_timer(struct timer_list *timer, unsigned long expires, unsigned int option
 	 * the timer is re-modified to have the same timeout or ends up in the
 	 * same array bucket then just return:
 	 */
-	if (!(options & MOD_TIMER_NOTPENDING) && timer_pending(timer)) {
+	pending = !(options & MOD_TIMER_NOTPENDING) && timer_pending(timer);
+	if (pending) {
 		/*
 		 * The downside of this optimization is that it can result in
 		 * larger granularity than you would get from adding a new
@@ -1039,24 +1041,20 @@ __mod_timer(struct timer_list *timer, unsigned long expires, unsigned int option
 			return 1;
 		if (options & MOD_TIMER_REDUCE && diff <= 0)
 			return 1;
+	}
 
-		/*
-		 * We lock timer base and calculate the bucket index right
-		 * here. If the timer ends up in the same bucket, then we
-		 * just update the expiry time and avoid the whole
-		 * dequeue/enqueue dance.
-		 */
-		base = lock_timer_base(timer, &flags);
-		/*
-		 * Has @timer been shutdown? This needs to be evaluated
-		 * while holding base lock to prevent a race against the
-		 * shutdown code.
-		 */
-		if (!timer->function)
-			goto out_unlock;
+	base = lock_timer_base(timer, &flags);
 
-		forward_timer_base(base);
+	/*
+	 * Has @timer been shutdown? This needs to be evaluated while holding
+	 * base lock to prevent a race against the shutdown code.
+	 */
+	if (!timer->function)
+		goto out_unlock;
 
+	forward_timer_base(base);
+
+	if (pending) {
 		if (timer_pending(timer) && (options & MOD_TIMER_REDUCE) &&
 		    time_before_eq(timer->expires, expires)) {
 			ret = 1;
@@ -1079,17 +1077,6 @@ __mod_timer(struct timer_list *timer, unsigned long expires, unsigned int option
 			ret = 1;
 			goto out_unlock;
 		}
-	} else {
-		base = lock_timer_base(timer, &flags);
-		/*
-		 * Has @timer been shutdown? This needs to be evaluated
-		 * while holding base lock to prevent a race against the
-		 * shutdown code.
-		 */
-		if (!timer->function)
-			goto out_unlock;
-
-		forward_timer_base(base);
 	}
 
 	ret = detach_if_pending(timer, base, false);
@@ -1739,7 +1726,7 @@ static void expire_timers(struct timer_base *base, struct hlist_head *head)
 
 		fn = timer->function;
 
-		if (WARN_ON_ONCE(!fn)) {
+		if (unlikely(WARN_ON_ONCE(!fn))) {
 			/* Should never happen. Emphasis on should! */
 			base->running_timer = NULL;
 			continue;
