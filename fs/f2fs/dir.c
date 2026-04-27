@@ -272,6 +272,7 @@ struct f2fs_dir_entry *f2fs_find_target_dentry(const struct f2fs_dentry_ptr *d,
 {
 	struct f2fs_dir_entry *de;
 	unsigned long bit_pos = 0;
+	u32 de_name_len;
 	int max_len = 0;
 	int res = 0;
 
@@ -291,10 +292,11 @@ struct f2fs_dir_entry *f2fs_find_target_dentry(const struct f2fs_dentry_ptr *d,
 			continue;
 		}
 
+		de_name_len = le16_to_cpu(de->name_len);
 		if (!use_hash || de->hash_code == fname->hash) {
 			res = f2fs_match_name(d->inode, fname,
 					      d->filename[bit_pos],
-					      le16_to_cpu(de->name_len));
+					      de_name_len);
 			if (res < 0)
 				return ERR_PTR(res);
 			if (res)
@@ -305,7 +307,7 @@ struct f2fs_dir_entry *f2fs_find_target_dentry(const struct f2fs_dentry_ptr *d,
 			*max_slots = max_len;
 		max_len = 0;
 
-		bit_pos += GET_DENTRY_SLOTS(le16_to_cpu(de->name_len));
+		bit_pos += GET_DENTRY_SLOTS(de_name_len);
 	}
 
 	de = NULL;
@@ -322,6 +324,7 @@ static struct f2fs_dir_entry *find_in_level(struct inode *dir,
 					bool use_hash)
 {
 	int s = GET_DENTRY_SLOTS(fname->disk_name.len);
+	int dir_level = F2FS_I(dir)->i_dir_level;
 	unsigned int nbucket, nblock;
 	unsigned int bidx, end_block, bucket_no;
 	struct page *dentry_page;
@@ -330,14 +333,13 @@ static struct f2fs_dir_entry *find_in_level(struct inode *dir,
 	bool room = false;
 	int max_slots;
 
-	nbucket = dir_buckets(level, F2FS_I(dir)->i_dir_level);
+	nbucket = dir_buckets(level, dir_level);
 	nblock = bucket_blocks(level);
 
 	bucket_no = use_hash ? le32_to_cpu(fname->hash) % nbucket : 0;
 
 start_find_bucket:
-	bidx = dir_block_index(level, F2FS_I(dir)->i_dir_level,
-			       bucket_no);
+	bidx = dir_block_index(level, dir_level, bucket_no);
 	end_block = bidx + nblock;
 
 	while (bidx < end_block) {
@@ -1048,16 +1050,16 @@ int f2fs_fill_dentries(struct dir_context *ctx, struct f2fs_dentry_ptr *d,
 		}
 
 		d_type = fs_ftype_to_dtype(de->file_type);
-
-		de_name.name = d->filename[bit_pos];
 		de_name.len = le16_to_cpu(de->name_len);
 
+		de_name.name = d->filename[bit_pos];
+
 		/* check memory boundary before moving forward */
-		bit_pos += GET_DENTRY_SLOTS(le16_to_cpu(de->name_len));
+		bit_pos += GET_DENTRY_SLOTS(de_name.len);
 		if (unlikely(bit_pos > d->max ||
-				le16_to_cpu(de->name_len) > F2FS_NAME_LEN)) {
+				de_name.len > F2FS_NAME_LEN)) {
 			f2fs_warn(sbi, "%s: corrupted namelen=%d, run fsck to fix.",
-				  __func__, le16_to_cpu(de->name_len));
+				  __func__, de_name.len);
 			set_sbi_flag(sbi, SBI_NEED_FSCK);
 			err = -EFSCORRUPTED;
 			f2fs_handle_error(sbi, ERROR_CORRUPTED_DIRENT);

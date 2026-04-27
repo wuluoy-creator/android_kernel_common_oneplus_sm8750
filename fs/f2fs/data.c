@@ -1480,10 +1480,14 @@ static int f2fs_map_no_dnode(struct inode *inode,
 	    (is_sbi_flag_set(sbi, SBI_IS_SHUTDOWN) || f2fs_cp_error(sbi)))
 		return -EIO;
 
-	if (map->m_next_pgofs)
-		*map->m_next_pgofs = f2fs_get_next_page_offset(dn, pgoff);
-	if (map->m_next_extent)
-		*map->m_next_extent = f2fs_get_next_page_offset(dn, pgoff);
+	if (map->m_next_pgofs || map->m_next_extent) {
+		pgoff_t next_pgofs = f2fs_get_next_page_offset(dn, pgoff);
+
+		if (map->m_next_pgofs)
+			*map->m_next_pgofs = next_pgofs;
+		if (map->m_next_extent)
+			*map->m_next_extent = next_pgofs;
+	}
 	return 0;
 }
 
@@ -1569,8 +1573,7 @@ int f2fs_map_blocks(struct inode *inode, struct f2fs_map_blocks *map, int flag)
 		goto out;
 
 	map->m_bdev = inode->i_sb->s_bdev;
-	map->m_multidev_dio =
-		f2fs_allow_multi_device_dio(F2FS_I_SB(inode), flag);
+	map->m_multidev_dio = f2fs_allow_multi_device_dio(sbi, flag);
 
 	map->m_len = 0;
 	map->m_flags = 0;
