@@ -290,7 +290,7 @@ static void bbr_set_pacing_rate(struct sock *sk, u32 bw, int gain)
 
 	if (unlikely(!bbr->has_seen_rtt && tp->srtt_us))
 		bbr_init_pacing_rate_from_rtt(sk);
-	if (bbr_full_bw_reached(sk) || rate > sk->sk_pacing_rate)
+	if (bbr->full_bw_reached || rate > sk->sk_pacing_rate)
 		sk->sk_pacing_rate = rate;
 }
 
@@ -453,13 +453,13 @@ static u32 bbr_packets_in_net_at_edt(struct sock *sk, u32 inflight_now)
 }
 
 /* Find the cwnd increment based on estimate of ack aggregation */
-static u32 bbr_ack_aggregation_cwnd(struct sock *sk)
+static u32 bbr_ack_aggregation_cwnd(struct sock *sk, u32 bw)
 {
+	struct bbr *bbr = inet_csk_ca(sk);
 	u32 max_aggr_cwnd, aggr_cwnd = 0;
 
-	if (bbr_extra_acked_gain && bbr_full_bw_reached(sk)) {
-		max_aggr_cwnd = ((u64)bbr_bw(sk) * bbr_extra_acked_max_us)
-				/ BW_UNIT;
+	if (bbr_extra_acked_gain && bbr->full_bw_reached) {
+		max_aggr_cwnd = ((u64)bw * bbr_extra_acked_max_us) / BW_UNIT;
 		aggr_cwnd = (bbr_extra_acked_gain * bbr_extra_acked(sk))
 			     >> BBR_SCALE;
 		aggr_cwnd = min(aggr_cwnd, max_aggr_cwnd);
@@ -522,7 +522,7 @@ static void bbr_set_cwnd(struct sock *sk, const struct rate_sample *rs,
 	struct bbr *bbr = inet_csk_ca(sk);
 	u32 cwnd = tcp_snd_cwnd(tp), target_cwnd = 0;
 
-	if (!acked)
+	if (unlikely(!acked))
 		goto done;  /* no packet fully ACKed; just apply caps */
 
 	if (bbr_set_cwnd_to_recover_or_restore(sk, rs, acked, &cwnd))
@@ -533,20 +533,22 @@ static void bbr_set_cwnd(struct sock *sk, const struct rate_sample *rs,
 	/* Increment the cwnd to account for excess ACKed data that seems
 	 * due to aggregation (of data and/or ACKs) visible in the ACK stream.
 	 */
-	target_cwnd += bbr_ack_aggregation_cwnd(sk);
+	target_cwnd += bbr_ack_aggregation_cwnd(sk, bw);
 	target_cwnd = bbr_quantization_budget(sk, target_cwnd);
 
 	/* If we're below target cwnd, slow start cwnd toward target cwnd. */
-	if (bbr_full_bw_reached(sk))  /* only cut cwnd if we filled the pipe */
+	if (bbr->full_bw_reached)  /* only cut cwnd if we filled the pipe */
 		cwnd = min(cwnd + acked, target_cwnd);
 	else if (cwnd < target_cwnd || tp->delivered < TCP_INIT_CWND)
 		cwnd = cwnd + acked;
 	cwnd = max(cwnd, bbr_cwnd_min_target);
 
 done:
-	tcp_snd_cwnd_set(tp, min(cwnd, tp->snd_cwnd_clamp));	/* apply global cap */
-	if (bbr->mode == BBR_PROBE_RTT)  /* drain queue, refresh min_rtt */
-		tcp_snd_cwnd_set(tp, min(tcp_snd_cwnd(tp), bbr_cwnd_min_target));
+	cwnd = min(cwnd, tp->snd_cwnd_clamp);	/* apply global cap */
+	/* Drain queue, refresh min_rtt. */
+	if (unlikely(bbr->mode == BBR_PROBE_RTT))
+		cwnd = min(cwnd, bbr_cwnd_min_target);
+	tcp_snd_cwnd_set(tp, cwnd);
 }
 
 /* End cycle phase if it's time and/or we hit the phase's in-flight target. */
@@ -764,7 +766,7 @@ static void bbr_update_bw(struct sock *sk, const struct rate_sample *rs)
 	u64 bw;
 
 	bbr->round_start = 0;
-	if (rs->delivered < 0 || rs->interval_us <= 0)
+	if (unlikely(rs->delivered < 0 || rs->interval_us <= 0))
 		return; /* Not a valid observation */
 
 	/* See if we've reached the next RTT */
@@ -873,14 +875,15 @@ static void bbr_check_full_bw_reached(struct sock *sk,
 				      const struct rate_sample *rs)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
-	u32 bw_thresh;
+	u32 bw, bw_thresh;
 
-	if (bbr_full_bw_reached(sk) || !bbr->round_start || rs->is_app_limited)
+	if (bbr->full_bw_reached || !bbr->round_start || rs->is_app_limited)
 		return;
 
 	bw_thresh = (u64)bbr->full_bw * bbr_full_bw_thresh >> BBR_SCALE;
-	if (bbr_max_bw(sk) >= bw_thresh) {
-		bbr->full_bw = bbr_max_bw(sk);
+	bw = bbr_max_bw(sk);
+	if (bw >= bw_thresh) {
+		bbr->full_bw = bw;
 		bbr->full_bw_cnt = 0;
 		return;
 	}
@@ -892,16 +895,26 @@ static void bbr_check_full_bw_reached(struct sock *sk,
 static void bbr_check_drain(struct sock *sk, const struct rate_sample *rs)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
+	bool have_bw = false;
+	u32 bw;
 
-	if (bbr->mode == BBR_STARTUP && bbr_full_bw_reached(sk)) {
+	if (bbr->mode == BBR_STARTUP && bbr->full_bw_reached) {
+		struct tcp_sock *tp = tcp_sk(sk);
+
+		bw = bbr_max_bw(sk);
+		have_bw = true;
 		bbr->mode = BBR_DRAIN;	/* drain queue we created */
-		tcp_sk(sk)->snd_ssthresh =
-				bbr_inflight(sk, bbr_max_bw(sk), BBR_UNIT);
+		tp->snd_ssthresh = bbr_inflight(sk, bw, BBR_UNIT);
 	}	/* fall through to check if in-flight is already small: */
-	if (bbr->mode == BBR_DRAIN &&
-	    bbr_packets_in_net_at_edt(sk, tcp_packets_in_flight(tcp_sk(sk))) <=
-	    bbr_inflight(sk, bbr_max_bw(sk), BBR_UNIT))
-		bbr_reset_probe_bw_mode(sk);  /* we estimate queue is drained */
+	if (bbr->mode == BBR_DRAIN) {
+		struct tcp_sock *tp = tcp_sk(sk);
+
+		if (!have_bw)
+			bw = bbr_max_bw(sk);
+		if (bbr_packets_in_net_at_edt(sk, tcp_packets_in_flight(tp)) <=
+		    bbr_inflight(sk, bw, BBR_UNIT))
+			bbr_reset_probe_bw_mode(sk);  /* queue is drained */
+	}
 }
 
 static void bbr_check_probe_rtt_done(struct sock *sk)
@@ -1129,7 +1142,7 @@ __bpf_kfunc static void bbr_set_state(struct sock *sk, u8 new_state)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
 
-	if (new_state == TCP_CA_Loss) {
+	if (unlikely(new_state == TCP_CA_Loss)) {
 		struct rate_sample rs = { .losses = 1 };
 
 		bbr->prev_ca_state = TCP_CA_Loss;
