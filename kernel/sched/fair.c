@@ -8115,10 +8115,8 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 	eenv_task_busy_time(&eenv, p, prev_cpu);
 
 	for (; pd; pd = pd->next) {
-		unsigned long util_min = p_util_min, util_max = p_util_max;
 		unsigned long cpu_cap, cpu_thermal_cap, util;
 		long prev_spare_cap = -1, max_spare_cap = -1;
-		unsigned long rq_util_min, rq_util_max;
 		unsigned long cur_delta, base_energy;
 		int max_spare_cap_cpu = -1;
 		int fits, max_fits = -1;
@@ -8140,6 +8138,8 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 		for_each_cpu(cpu, cpus) {
 			struct rq *rq = cpu_rq(cpu);
 			unsigned long util_b, eff_util_b, min_b, max_b;
+			unsigned long util_min = p_util_min;
+			unsigned long util_max = p_util_max;
 
 			eenv.pd_cap += cpu_thermal_cap;
 
@@ -8166,6 +8166,8 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 			 * aligned with sched_cpu_util().
 			 */
 			if (uclamp_is_used() && !uclamp_rq_is_idle(rq)) {
+				unsigned long rq_util_min, rq_util_max;
+
 				/*
 				 * Open code uclamp_rq_util_with() except for
 				 * the clamp() part. Ie: apply max aggregation
