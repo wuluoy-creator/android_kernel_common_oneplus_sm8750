@@ -6800,6 +6800,26 @@ static inline void set_rd_overutilized_status(struct root_domain *rd,
 	WRITE_ONCE(rd->overutilized, status);
 	trace_sched_overutilized_tp(rd, !!status);
 }
+
+static bool rd_overutilized(struct root_domain *rd, struct sched_domain *sd)
+{
+	unsigned int nr_overutilized = 0;
+	unsigned int threshold;
+	int cpu;
+
+	if (!READ_ONCE(rd->overutilized))
+		return false;
+
+	/* Avoid disabling EAS on wakeup because of stale root-domain state. */
+	threshold = sd->span_weight >> 1;
+	for_each_cpu_and(cpu, sched_domain_span(sd), rd->online) {
+		if (cpu_overutilized(cpu) && ++nr_overutilized > threshold)
+			return true;
+	}
+
+	set_rd_overutilized_status(rd, 0);
+	return false;
+}
 #endif
 
 /* Runqueue only has SCHED_IDLE tasks enqueued */
@@ -8085,16 +8105,8 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 
 	rcu_read_lock();
 	pd = rcu_dereference(rd->pd);
-	if (!pd || READ_ONCE(rd->overutilized))
+	if (!pd)
 		goto unlock;
-
-	cpu = smp_processor_id();
-	if (sync && cpu_rq(cpu)->nr_running == 1 &&
-	    cpumask_test_cpu(cpu, p->cpus_ptr) &&
-	    task_fits_cpu(p, cpu)) {
-		rcu_read_unlock();
-		return cpu;
-	}
 
 	/*
 	 * Energy-aware wake-up happens on the lowest sched_domain starting
@@ -8105,6 +8117,17 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 		sd = sd->parent;
 	if (!sd)
 		goto unlock;
+
+	if (rd_overutilized(rd, sd))
+		goto unlock;
+
+	cpu = smp_processor_id();
+	if (sync && cpu_rq(cpu)->nr_running == 1 &&
+	    cpumask_test_cpu(cpu, p->cpus_ptr) &&
+	    task_fits_cpu(p, cpu)) {
+		rcu_read_unlock();
+		return cpu;
+	}
 
 	target = prev_cpu;
 
@@ -8261,8 +8284,11 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 	}
 	rcu_read_unlock();
 
+	/* Avoid cross-LLC ping-pong for marginal energy wins. */
 	if ((best_fits > prev_fits) ||
-	    ((best_fits > 0) && (best_delta < prev_delta)) ||
+	    ((best_fits > 0) && (best_delta < prev_delta) &&
+	     (cpus_share_cache(prev_cpu, best_energy_cpu) ||
+	      best_delta < prev_delta - (prev_delta >> 4))) ||
 	    ((best_fits < 0) && (best_thermal_cap > prev_thermal_cap)))
 		target = best_energy_cpu;
 
