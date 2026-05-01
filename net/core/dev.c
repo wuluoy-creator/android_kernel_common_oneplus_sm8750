@@ -5843,10 +5843,11 @@ void netif_receive_skb_list_internal(struct list_head *head)
 {
 	struct sk_buff *skb, *next;
 	struct list_head sublist;
+	bool tstamp_prequeue = READ_ONCE(netdev_tstamp_prequeue);
 
 	INIT_LIST_HEAD(&sublist);
 	list_for_each_entry_safe(skb, next, head, list) {
-		net_timestamp_check(READ_ONCE(netdev_tstamp_prequeue), skb);
+		net_timestamp_check(tstamp_prequeue, skb);
 		skb_list_del_init(skb);
 		if (!skb_defer_rx_timestamp(skb))
 			list_add_tail(&skb->list, &sublist);
