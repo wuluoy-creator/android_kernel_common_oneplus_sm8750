@@ -200,6 +200,8 @@ static const u32 bbr_extra_acked_win_rtts = 5;
 static const u32 bbr_ack_epoch_acked_reset_thresh = 1U << 20;
 /* Time period for clamping cwnd increment due to ack aggregation */
 static const u32 bbr_extra_acked_max_us = 100 * 1000;
+/* Reduce transient queue growth on lossy/shallow-buffer paths. */
+static const u32 bbr_loss_extra_acked_gain = BBR_UNIT / 2;
 
 static void bbr_check_probe_rtt_done(struct sock *sk);
 
@@ -453,15 +455,18 @@ static u32 bbr_packets_in_net_at_edt(struct sock *sk, u32 inflight_now)
 }
 
 /* Find the cwnd increment based on estimate of ack aggregation */
-static u32 bbr_ack_aggregation_cwnd(struct sock *sk, u32 bw)
+static u32 bbr_ack_aggregation_cwnd(struct sock *sk,
+				    const struct rate_sample *rs, u32 bw)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
 	u32 max_aggr_cwnd, aggr_cwnd = 0;
 
 	if (bbr_extra_acked_gain && bbr->full_bw_reached) {
+		u32 gain = rs->losses ? bbr_loss_extra_acked_gain :
+					 bbr_extra_acked_gain;
+
 		max_aggr_cwnd = ((u64)bw * bbr_extra_acked_max_us) / BW_UNIT;
-		aggr_cwnd = (bbr_extra_acked_gain * bbr_extra_acked(sk))
-			     >> BBR_SCALE;
+		aggr_cwnd = (gain * bbr_extra_acked(sk)) >> BBR_SCALE;
 		aggr_cwnd = min(aggr_cwnd, max_aggr_cwnd);
 	}
 
@@ -533,7 +538,7 @@ static void bbr_set_cwnd(struct sock *sk, const struct rate_sample *rs,
 	/* Increment the cwnd to account for excess ACKed data that seems
 	 * due to aggregation (of data and/or ACKs) visible in the ACK stream.
 	 */
-	target_cwnd += bbr_ack_aggregation_cwnd(sk, bw);
+	target_cwnd += bbr_ack_aggregation_cwnd(sk, rs, bw);
 	target_cwnd = bbr_quantization_budget(sk, target_cwnd);
 
 	/* If we're below target cwnd, slow start cwnd toward target cwnd. */
@@ -576,10 +581,15 @@ static bool bbr_is_next_cycle_phase(struct sock *sk,
 	 * small (e.g. on a LAN). We do not persist if packets are lost, since
 	 * a path with small buffers may not hold that much.
 	 */
-	if (bbr->pacing_gain > BBR_UNIT)
+	if (bbr->pacing_gain > BBR_UNIT) {
+		/* On lossy/shallow-buffer paths, stop high-gain probing as soon
+		 * as loss shows the current inflight probably does not fit.
+		 */
+		if (rs->losses)
+			return true;
 		return is_full_length &&
-			(rs->losses ||  /* perhaps pacing_gain*BDP won't fit */
-			 inflight >= bbr_inflight(sk, bw, bbr->pacing_gain));
+			inflight >= bbr_inflight(sk, bw, bbr->pacing_gain);
+	}
 
 	/* A pacing_gain < 1.0 tries to drain extra queue we added if bw
 	 * probing didn't find more bw. If inflight falls to match BDP then we
@@ -888,6 +898,8 @@ static void bbr_check_full_bw_reached(struct sock *sk,
 		return;
 	}
 	++bbr->full_bw_cnt;
+	if (rs->losses && bbr->full_bw_cnt >= bbr_full_bw_cnt - 1)
+		bbr->full_bw_cnt = bbr_full_bw_cnt;
 	bbr->full_bw_reached = bbr->full_bw_cnt >= bbr_full_bw_cnt;
 }
 
@@ -1044,7 +1056,10 @@ __bpf_kfunc static void bbr_main(struct sock *sk, const struct rate_sample *rs)
 	bbr_update_model(sk, rs);
 
 	bw = bbr_bw(sk);
-	bbr_set_pacing_rate(sk, bw, bbr->pacing_gain);
+	bbr_set_pacing_rate(sk, bw,
+			    rs->losses && bbr->mode == BBR_PROBE_BW ?
+			    min_t(u32, bbr->pacing_gain, BBR_UNIT) :
+			    bbr->pacing_gain);
 	bbr_set_cwnd(sk, rs, rs->acked_sacked, bw, bbr->cwnd_gain);
 }
 
