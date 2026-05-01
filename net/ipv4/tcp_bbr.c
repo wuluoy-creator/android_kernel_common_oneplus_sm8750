@@ -214,28 +214,22 @@ static bool bbr_full_bw_reached(const struct sock *sk)
 }
 
 /* Return the windowed max recent bandwidth sample, in pkts/uS << BW_SCALE. */
-static u32 bbr_max_bw(const struct sock *sk)
+static inline u32 bbr_max_bw_from_bbr(const struct bbr *bbr)
 {
-	struct bbr *bbr = inet_csk_ca(sk);
-
 	return minmax_get(&bbr->bw);
 }
 
 /* Return the estimated bandwidth of the path, in pkts/uS << BW_SCALE. */
-static u32 bbr_bw(const struct sock *sk)
+static inline u32 bbr_bw_from_bbr(const struct bbr *bbr)
 {
-	struct bbr *bbr = inet_csk_ca(sk);
-
-	return bbr->lt_use_bw ? bbr->lt_bw : bbr_max_bw(sk);
+	return bbr->lt_use_bw ? bbr->lt_bw : bbr_max_bw_from_bbr(bbr);
 }
 
 /* Return maximum extra acked in past k-2k round trips,
  * where k = bbr_extra_acked_win_rtts.
  */
-static u16 bbr_extra_acked(const struct sock *sk)
+static inline u16 bbr_extra_acked_from_bbr(const struct bbr *bbr)
 {
-	struct bbr *bbr = inet_csk_ca(sk);
-
 	return max(bbr->extra_acked[0], bbr->extra_acked[1]);
 }
 
@@ -297,23 +291,30 @@ static void bbr_set_pacing_rate(struct sock *sk, u32 bw, int gain)
 }
 
 /* override sysctl_tcp_min_tso_segs */
+static inline u32 bbr_min_tso_segs_from_rate(unsigned long sk_pacing_rate)
+{
+	return sk_pacing_rate < (bbr_min_tso_rate >> 3) ? 1 : 2;
+}
+
 __bpf_kfunc static u32 bbr_min_tso_segs(struct sock *sk)
 {
-	return sk->sk_pacing_rate < (bbr_min_tso_rate >> 3) ? 1 : 2;
+	return bbr_min_tso_segs_from_rate(sk->sk_pacing_rate);
 }
 
 static u32 bbr_tso_segs_goal(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
+	unsigned long sk_pacing_rate = sk->sk_pacing_rate;
 	u32 segs, bytes;
 
 	/* Sort of tcp_tso_autosize() but ignoring
 	 * driver provided sk_gso_max_size.
 	 */
 	bytes = min_t(unsigned long,
-		      sk->sk_pacing_rate >> READ_ONCE(sk->sk_pacing_shift),
+		      sk_pacing_rate >> READ_ONCE(sk->sk_pacing_shift),
 		      GSO_LEGACY_MAX_SIZE - 1 - MAX_TCP_HEADER);
-	segs = max_t(u32, bytes / tp->mss_cache, bbr_min_tso_segs(sk));
+	segs = max_t(u32, bytes / tp->mss_cache,
+		     bbr_min_tso_segs_from_rate(sk_pacing_rate));
 
 	return min(segs, 0x7FU);
 }
@@ -343,7 +344,7 @@ __bpf_kfunc static void bbr_cwnd_event(struct sock *sk, enum tcp_ca_event event)
 		 * need more speed (we're restarting from idle and app-limited).
 		 */
 		if (bbr->mode == BBR_PROBE_BW)
-			bbr_set_pacing_rate(sk, bbr_bw(sk), BBR_UNIT);
+			bbr_set_pacing_rate(sk, bbr_bw_from_bbr(bbr), BBR_UNIT);
 		else if (bbr->mode == BBR_PROBE_RTT)
 			bbr_check_probe_rtt_done(sk);
 	}
@@ -445,7 +446,7 @@ static u32 bbr_packets_in_net_at_edt(struct sock *sk, u32 inflight_now)
 	now_ns = tp->tcp_clock_cache;
 	edt_ns = max(tp->tcp_wstamp_ns, now_ns);
 	interval_us = div_u64(edt_ns - now_ns, NSEC_PER_USEC);
-	interval_delivered = (u64)bbr_bw(sk) * interval_us >> BW_SCALE;
+	interval_delivered = (u64)bbr_bw_from_bbr(bbr) * interval_us >> BW_SCALE;
 	inflight_at_edt = inflight_now;
 	if (bbr->pacing_gain > BBR_UNIT)              /* increasing inflight */
 		inflight_at_edt += bbr_tso_segs_goal(sk);  /* include EDT skb */
@@ -466,7 +467,7 @@ static u32 bbr_ack_aggregation_cwnd(struct sock *sk,
 					 bbr_extra_acked_gain;
 
 		max_aggr_cwnd = ((u64)bw * bbr_extra_acked_max_us) / BW_UNIT;
-		aggr_cwnd = (gain * bbr_extra_acked(sk)) >> BBR_SCALE;
+		aggr_cwnd = (gain * bbr_extra_acked_from_bbr(bbr)) >> BBR_SCALE;
 		aggr_cwnd = min(aggr_cwnd, max_aggr_cwnd);
 	}
 
@@ -574,7 +575,7 @@ static bool bbr_is_next_cycle_phase(struct sock *sk,
 		return is_full_length;		/* just use wall clock time */
 
 	inflight = bbr_packets_in_net_at_edt(sk, rs->prior_in_flight);
-	bw = bbr_max_bw(sk);
+	bw = bbr_max_bw_from_bbr(bbr);
 
 	/* A pacing_gain > 1.0 probes for bw by trying to raise inflight to at
 	 * least pacing_gain*BDP; this may take more than min_rtt if min_rtt is
@@ -806,7 +807,7 @@ static void bbr_update_bw(struct sock *sk, const struct rate_sample *rs)
 	 * network rate no matter how long. We automatically leave this
 	 * phase when app writes faster than the network can deliver :)
 	 */
-	if (!rs->is_app_limited || bw >= bbr_max_bw(sk)) {
+	if (!rs->is_app_limited || bw >= bbr_max_bw_from_bbr(bbr)) {
 		/* Incorporate new sample into our max bw filter. */
 		minmax_running_max(&bbr->bw, bbr_bw_rtts, bbr->rtt_cnt, bw);
 	}
@@ -850,7 +851,7 @@ static void bbr_update_ack_aggregation(struct sock *sk,
 	/* Compute how many packets we expected to be delivered over epoch. */
 	epoch_us = tcp_stamp_us_delta(tp->delivered_mstamp,
 				      bbr->ack_epoch_mstamp);
-	expected_acked = ((u64)bbr_bw(sk) * epoch_us) / BW_UNIT;
+	expected_acked = ((u64)bbr_bw_from_bbr(bbr) * epoch_us) / BW_UNIT;
 
 	/* Reset the aggregation epoch if ACK rate is below expected rate or
 	 * significantly large no. of ack received since epoch (potentially
@@ -891,7 +892,7 @@ static void bbr_check_full_bw_reached(struct sock *sk,
 		return;
 
 	bw_thresh = (u64)bbr->full_bw * bbr_full_bw_thresh >> BBR_SCALE;
-	bw = bbr_max_bw(sk);
+	bw = bbr_max_bw_from_bbr(bbr);
 	if (bw >= bw_thresh) {
 		bbr->full_bw = bw;
 		bbr->full_bw_cnt = 0;
@@ -908,21 +909,26 @@ static void bbr_check_drain(struct sock *sk, const struct rate_sample *rs)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
 	bool have_bw = false;
+	u32 mode = bbr->mode;
 	u32 bw;
 
-	if (bbr->mode == BBR_STARTUP && bbr->full_bw_reached) {
+	if (mode != BBR_STARTUP && mode != BBR_DRAIN)
+		return;
+
+	if (mode == BBR_STARTUP && bbr->full_bw_reached) {
 		struct tcp_sock *tp = tcp_sk(sk);
 
-		bw = bbr_max_bw(sk);
+		bw = bbr_max_bw_from_bbr(bbr);
 		have_bw = true;
 		bbr->mode = BBR_DRAIN;	/* drain queue we created */
 		tp->snd_ssthresh = bbr_inflight(sk, bw, BBR_UNIT);
+		mode = BBR_DRAIN;
 	}	/* fall through to check if in-flight is already small: */
-	if (bbr->mode == BBR_DRAIN) {
+	if (mode == BBR_DRAIN) {
 		struct tcp_sock *tp = tcp_sk(sk);
 
 		if (!have_bw)
-			bw = bbr_max_bw(sk);
+			bw = bbr_max_bw_from_bbr(bbr);
 		if (bbr_packets_in_net_at_edt(sk, tcp_packets_in_flight(tp)) <=
 		    bbr_inflight(sk, bw, BBR_UNIT))
 			bbr_reset_probe_bw_mode(sk);  /* queue is drained */
@@ -967,15 +973,16 @@ static void bbr_update_min_rtt(struct sock *sk, const struct rate_sample *rs)
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct bbr *bbr = inet_csk_ca(sk);
 	bool filter_expired;
+	u32 now = tcp_jiffies32;
 
 	/* Track min RTT seen in the min_rtt_win_sec filter window: */
-	filter_expired = after(tcp_jiffies32,
+	filter_expired = after(now,
 			       bbr->min_rtt_stamp + bbr_min_rtt_win_sec * HZ);
 	if (rs->rtt_us >= 0 &&
 	    (rs->rtt_us < bbr->min_rtt_us ||
 	     (filter_expired && !rs->is_ack_delayed))) {
 		bbr->min_rtt_us = rs->rtt_us;
-		bbr->min_rtt_stamp = tcp_jiffies32;
+		bbr->min_rtt_stamp = now;
 	}
 
 	if (bbr_probe_rtt_mode_ms > 0 && filter_expired &&
@@ -986,13 +993,15 @@ static void bbr_update_min_rtt(struct sock *sk, const struct rate_sample *rs)
 	}
 
 	if (bbr->mode == BBR_PROBE_RTT) {
+		u32 inflight = tcp_packets_in_flight(tp);
+
 		/* Ignore low rate samples during this mode. */
 		tp->app_limited =
-			(tp->delivered + tcp_packets_in_flight(tp)) ? : 1;
+			(tp->delivered + inflight) ? : 1;
 		/* Maintain min packets in flight for max(200 ms, 1 round). */
 		if (!bbr->probe_rtt_done_stamp &&
-		    tcp_packets_in_flight(tp) <= bbr_cwnd_min_target) {
-			bbr->probe_rtt_done_stamp = tcp_jiffies32 +
+		    inflight <= bbr_cwnd_min_target) {
+			bbr->probe_rtt_done_stamp = now +
 				msecs_to_jiffies(bbr_probe_rtt_mode_ms);
 			bbr->probe_rtt_round_done = 0;
 			bbr->next_rtt_delivered = tp->delivered;
@@ -1051,15 +1060,16 @@ static void bbr_update_model(struct sock *sk, const struct rate_sample *rs)
 __bpf_kfunc static void bbr_main(struct sock *sk, const struct rate_sample *rs)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
+	u32 pacing_gain;
 	u32 bw;
 
 	bbr_update_model(sk, rs);
 
-	bw = bbr_bw(sk);
-	bbr_set_pacing_rate(sk, bw,
-			    rs->losses && bbr->mode == BBR_PROBE_BW ?
-			    min_t(u32, bbr->pacing_gain, BBR_UNIT) :
-			    bbr->pacing_gain);
+	bw = bbr_bw_from_bbr(bbr);
+	pacing_gain = bbr->pacing_gain;
+	if (rs->losses && bbr->mode == BBR_PROBE_BW)
+		pacing_gain = min_t(u32, pacing_gain, BBR_UNIT);
+	bbr_set_pacing_rate(sk, bw, pacing_gain);
 	bbr_set_cwnd(sk, rs, rs->acked_sacked, bw, bbr->cwnd_gain);
 }
 
@@ -1138,7 +1148,7 @@ static size_t bbr_get_info(struct sock *sk, u32 ext, int *attr,
 	    ext & (1 << (INET_DIAG_VEGASINFO - 1))) {
 		struct tcp_sock *tp = tcp_sk(sk);
 		struct bbr *bbr = inet_csk_ca(sk);
-		u64 bw = bbr_bw(sk);
+		u64 bw = bbr_bw_from_bbr(bbr);
 
 		bw = bw * tp->mss_cache * USEC_PER_SEC >> BW_SCALE;
 		memset(&info->bbr, 0, sizeof(info->bbr));
