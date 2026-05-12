@@ -163,6 +163,12 @@ jobs:
             patch -p1 < "$SUSFS_PATCH"
             patch -p1 -N -F 3 < 69_hide_stuff.patch || true
 
+            # 修复部分源码与 hide_stuff/SUSFS 补丁组合后产生的非法声明：
+            # extern static int ... -> static int ...
+            if [[ -f "$GITHUB_WORKSPACE/security/selinux/hooks.c" ]]; then
+              sed -i 's/\bextern static\b/static/g' "$GITHUB_WORKSPACE/security/selinux/hooks.c"
+            fi
+
             add_susfs_config
           }
 
