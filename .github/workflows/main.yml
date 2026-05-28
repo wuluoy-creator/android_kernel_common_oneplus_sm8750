@@ -159,6 +159,7 @@ jobs:
           name: OnePlus-SM8750-sun-${{ github.event.inputs.kernel_branch }}-内核卡刷包
           path: |
             OnePlus-SM8750-sun-Custom-Kernel.zip
+            out/vmlinux
             build.log
             out/.config
           retention-days: 90
